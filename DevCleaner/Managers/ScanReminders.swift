@@ -18,87 +18,114 @@
 //  You should have received a copy of the GNU General Public License
 //  along with DevCleaner.  If not, see <http://www.gnu.org/licenses/>.
 
-import Foundation
 import Cocoa
-import NotificationCenter
+import Foundation
+import UserNotifications
 
 public final class ScanReminders {
     // MARK: Types
     public enum Period: Int {
         case everyWeek, every2weeks, everyMonth, every2Months
-        
+
         private var dateComponents: DateComponents {
             var result = DateComponents()
-            
+
             switch self {
-                case .everyWeek:
-                    result.day = 7
-                case .every2weeks:
-                    result.day = 7 * 2
-                case .everyMonth:
-                    result.month = 1
-                case .every2Months:
-                    result.month = 2
+            case .everyWeek:
+                result.day = 7
+            case .every2weeks:
+                result.day = 7 * 2
+            case .everyMonth:
+                result.month = 1
+            case .every2Months:
+                result.month = 2
             }
-            
+
             return result
         }
-        
+
         internal var repeatInterval: DateComponents {
             var result = DateComponents()
-            
+
             #if DEBUG
-            if Preferences.shared.envKeyPresent(key: "DCNotificationsTest") {
-                result.day = 1 // for debug we change our periods to one day
-            } else {
-                result = self.dateComponents
-            }
+                if Preferences.shared.envKeyPresent(key: "DCNotificationsTest") {
+                    result.day = 1  // for debug we change our periods to one day
+                } else {
+                    result = self.dateComponents
+                }
             #else
-            result = self.dateComponents
+                result = self.dateComponents
             #endif
-            
+
             return result
         }
     }
-    
+
     // MARK: Properties
     public static var dateOfNextReminder: Date? {
-        if let firstScheduledNotification = NSUserNotificationCenter.default.scheduledNotifications.first {
-            return firstScheduledNotification.deliveryDate
-        } else {
-            return nil
+        let center = UNUserNotificationCenter.current()
+        var result: Date?
+
+        let semaphore = DispatchSemaphore(value: 0)
+        center.getPendingNotificationRequests { requests in
+            if let firstRequest = requests.first(where: { $0.identifier == self.reminderIdentifier }
+            ),
+                let nextTriggerDate = (firstRequest.trigger as? UNCalendarNotificationTrigger)?
+                    .nextTriggerDate()
+            {
+                result = nextTriggerDate
+            }
+            semaphore.signal()
         }
+        _ = semaphore.wait(timeout: .now() + 1.0)
+
+        return result
     }
-    
+
     // MARK: Constants
     private static let reminderIdentifier = "com.oneminutegames.DevCleaner.scanReminder"
-    
+
     // MARK: Manage reminders
     public static func scheduleReminder(period: Period) {
-        // notification
-        let notification = NSUserNotification()
-        notification.identifier = reminderIdentifier
-        notification.title = "Scan Xcode cache?"
-        notification.informativeText = "It's been a while since your last scan, check if you can reclaim some storage."
-        notification.soundName = NSUserNotificationDefaultSoundName
-        
-        // buttons
-        notification.hasActionButton = true
-        notification.otherButtonTitle = "Close"
-        notification.actionButtonTitle = "Scan"
-        
-        // schedule & repeat periodically
-        if let initialDeliveryDate = NSCalendar.current.date(byAdding: period.repeatInterval, to: Date()) {
-            notification.deliveryDate = initialDeliveryDate
-            notification.deliveryRepeatInterval = period.repeatInterval
+        let center = UNUserNotificationCenter.current()
+
+        // Request authorization
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            guard granted else { return }
+
+            // Create notification content
+            let content = UNMutableNotificationContent()
+            content.title = "Scan Xcode cache?"
+            content.body =
+                "It's been a while since your last scan, check if you can reclaim some storage."
+            content.sound = .default
+
+            // Calculate next notification date
+            let calendar = Calendar.current
+            if let initialDeliveryDate = calendar.date(byAdding: period.repeatInterval, to: Date())
+            {
+                let components = calendar.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second],
+                    from: initialDeliveryDate)
+                let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+
+                // Create request
+                let request = UNNotificationRequest(
+                    identifier: reminderIdentifier,
+                    content: content,
+                    trigger: trigger)
+
+                // Schedule notification
+                center.add(request) { error in
+                    if let error = error {
+                        print("Error scheduling notification: \(error)")
+                    }
+                }
+            }
         }
-        
-        // schedule a notification
-        let notificationCenter = NSUserNotificationCenter.default
-        notificationCenter.scheduleNotification(notification)
     }
-    
+
     public static func disableReminder() {
-        NSUserNotificationCenter.default.scheduledNotifications = []
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
     }
 }
